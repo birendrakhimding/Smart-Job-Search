@@ -1,0 +1,57 @@
+# =====================
+# Datasets
+# =====================
+
+*.csv
+*.json
+*.xlsx
+*.xls
+
+# Data folders
+**/data/
+**/dataset/
+**/datasets/
+
+# LinkedIn datasets
+linkedin_job/companies/
+linkedin_job/jobs/
+linkedin_job/mappings/
+
+
+# =====================
+# Python files
+# =====================
+
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+
+# =====================
+# Models
+# =====================
+
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.pth
+
+
+# =====================
+# Environment
+# =====================
+
+.env
+venv/
+.venv/
+
+
+# =====================
+# OS
+# =====================
+
+.DS_Store
+Thumbs.db
