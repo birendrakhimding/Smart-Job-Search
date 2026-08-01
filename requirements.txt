@@ -1,0 +1,7 @@
+streamlit
+sentence-transformers
+google-generativeai
+scikit-learn
+pymupdf
+requests
+python-dotenv
