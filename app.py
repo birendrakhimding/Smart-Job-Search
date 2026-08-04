@@ -49,6 +49,10 @@ def load_keys():
 
 keys = load_keys()
 
+# Debug
+st.write("Gemini key loaded:", keys["gemini"] is not None)
+st.write("JSearch key loaded:", keys["jsearch"] is not None)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Load Models (cached so they only load once)
 # ─────────────────────────────────────────────────────────────────────────────
