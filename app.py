@@ -60,7 +60,7 @@ def load_gemini():
 
 @st.cache_resource
 def load_sentence_transformer():
-    return SentenceTransformer("fine_tuned_minilm")
+    return SentenceTransformer("minsolimbu/smart-job-search-model")
 
 gemini_model = load_gemini()
 st_model = load_sentence_transformer()
