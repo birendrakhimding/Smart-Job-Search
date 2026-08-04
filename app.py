@@ -1,5 +1,4 @@
-
-# Streamlit Web Application — Smart Job Search
+# Streamlit Web Application — Smart Job Search (with LangGraph)
 
 
 import streamlit as st
@@ -8,11 +7,13 @@ import re
 import json
 import requests
 import numpy as np
+from typing import TypedDict, List
 from datetime import datetime
 
 import google.generativeai as genai
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity as cos_sim
+from langgraph.graph import StateGraph, END
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page Config
@@ -29,9 +30,7 @@ st.set_page_config(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_keys():
-    """Load API keys from Streamlit secrets (deployed) or .env (local)."""
     try:
-        # Streamlit Cloud deployment
         return {
             "gemini": st.secrets["GEMINI_API_KEY"],
             "jsearch": st.secrets["JSEARCH_API_KEY"],
@@ -39,7 +38,6 @@ def load_keys():
             "adzuna_key": st.secrets["ADZUNA_APP_KEY"],
         }
     except:
-        # Local development with .env
         from dotenv import load_dotenv
         load_dotenv()
         return {
@@ -72,7 +70,6 @@ st_model = load_sentence_transformer()
 # ─────────────────────────────────────────────────────────────────────────────
 
 def extract_text_from_pdf(uploaded_file):
-    """Extract text from uploaded PDF file."""
     import fitz
     pdf_bytes = uploaded_file.read()
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -82,9 +79,7 @@ def extract_text_from_pdf(uploaded_file):
     doc.close()
     return text
 
-
 def clean_text_for_model(text):
-    """Light cleaning matching the fine-tuning preprocessing."""
     if not isinstance(text, str):
         return ""
     text = re.sub(r'<[^>]+>', ' ', text)
@@ -94,9 +89,25 @@ def clean_text_for_model(text):
     text = re.sub(r'\s+', ' ', text).strip()
     return ' '.join(text.split()[:256])
 
+# ─────────────────────────────────────────────────────────────────────────────
+# LangGraph Agent State
+# ─────────────────────────────────────────────────────────────────────────────
 
-def parse_resume(resume_text):
-    """Use Gemini to extract structured information from the resume."""
+class AgentState(TypedDict):
+    resume_text: str
+    parsed_resume: dict
+    search_queries: List[str]
+    jobs: List[dict]
+    scored_jobs: List[dict]
+    status: str
+    errors: List[str]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LangGraph Node Functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+def parse_resume_node(state: AgentState) -> AgentState:
+    resume_text = state["resume_text"]
     prompt = f"""Analyze this resume and extract the following information. 
 Respond ONLY in valid JSON format with no markdown backticks or extra text.
 
@@ -118,14 +129,20 @@ Resume:
     try:
         response = gemini_model.generate_content(prompt)
         response_text = response.text.strip().replace("```json", "").replace("```", "").strip()
-        return json.loads(response_text)
+        state["parsed_resume"] = json.loads(response_text)
+        state["status"] = "resume_parsed"
     except Exception as e:
-        st.error(f"Error parsing resume: {e}")
-        return None
+        state["errors"].append(f"Resume parsing error: {e}")
+        state["parsed_resume"] = {
+            "skills": [], "category": "INFORMATION-TECHNOLOGY",
+            "summary": resume_text[:200], "name": "Unknown"
+        }
+        state["status"] = "resume_parse_failed"
+    return state
 
 
-def generate_search_queries(parsed):
-    """Use Gemini to generate job search queries."""
+def generate_queries_node(state: AgentState) -> AgentState:
+    parsed = state["parsed_resume"]
     prompt = f"""Based on this candidate profile, generate 3-5 job search queries 
 that would find the best matching job postings. Each query should be 3-6 words.
 Respond ONLY as a JSON array of strings, no markdown.
@@ -142,93 +159,95 @@ Example output: ["software engineer python", "backend developer", "full stack de
         response = gemini_model.generate_content(prompt)
         response_text = response.text.strip().replace("```json", "").replace("```", "").strip()
         queries = json.loads(response_text)
-        return queries if queries else [parsed.get("category", "developer")]
-    except:
-        return parsed.get("job_titles", ["developer"])[:3]
+        state["search_queries"] = queries if queries else [parsed.get("category", "developer")]
+        state["status"] = "queries_generated"
+    except Exception as e:
+        state["errors"].append(f"Query generation error: {e}")
+        state["search_queries"] = parsed.get("job_titles", ["developer"])[:3]
+        state["status"] = "queries_fallback"
+    return state
 
 
-def search_jsearch(query, num_results=5):
-    """Fetch jobs from JSearch API."""
-    url = "https://jsearch.p.rapidapi.com/search-v2"
-    headers = {
-        "x-rapidapi-key": keys["jsearch"],
-        "x-rapidapi-host": "jsearch.p.rapidapi.com",
-        "Content-Type": "application/json"
-    }
-    params = {"query": query, "page": "1", "num_pages": "1", "date_posted": "month"}
-
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=15)
-        data = response.json()
-        jobs = []
-        for job in data.get("data", {}).get("jobs", [])[:num_results]:
-            jobs.append({
-                "title": job.get("job_title", "N/A"),
-                "company": job.get("employer_name", "N/A"),
-                "location": job.get("job_city", "Remote"),
-                "description": job.get("job_description", "")[:500],
-                "full_description": job.get("job_description", ""),
-                "salary_min": job.get("job_min_salary"),
-                "salary_max": job.get("job_max_salary"),
-                "apply_link": job.get("job_apply_link", ""),
-                "source": "JSearch",
-            })
-        return jobs
-    except:
-        return []
-
-
-def search_adzuna(query, num_results=5):
-    """Fetch jobs from Adzuna API."""
-    url = "https://api.adzuna.com/v1/api/jobs/us/search/1"
-    params = {
-        "app_id": keys["adzuna_id"],
-        "app_key": keys["adzuna_key"],
-        "results_per_page": num_results,
-        "what": query,
-        "max_days_old": 30,
-    }
-
-    try:
-        response = requests.get(url, params=params, timeout=15)
-        data = response.json()
-        jobs = []
-        for job in data.get("results", [])[:num_results]:
-            jobs.append({
-                "title": job.get("title", "N/A"),
-                "company": job.get("company", {}).get("display_name", "N/A"),
-                "location": job.get("location", {}).get("display_name", "Remote"),
-                "description": job.get("description", "")[:500],
-                "full_description": job.get("description", ""),
-                "salary_min": job.get("salary_min"),
-                "salary_max": job.get("salary_max"),
-                "apply_link": job.get("redirect_url", ""),
-                "source": "Adzuna",
-            })
-        return jobs
-    except:
-        return []
-
-
-def search_all_jobs(queries):
-    """Search both APIs with all queries, deduplicate results."""
+def search_jobs_node(state: AgentState) -> AgentState:
+    queries = state["search_queries"]
     all_jobs = []
     seen = set()
 
     for query in queries:
-        for job in search_jsearch(query) + search_adzuna(query):
-            key = f"{job['title'].lower().strip()}_{job['company'].lower().strip()}"
-            if key not in seen:
-                seen.add(key)
-                all_jobs.append(job)
+        # JSearch
+        try:
+            url = "https://jsearch.p.rapidapi.com/search-v2"
+            headers = {
+                "x-rapidapi-key": keys["jsearch"],
+                "x-rapidapi-host": "jsearch.p.rapidapi.com",
+                "Content-Type": "application/json"
+            }
+            params = {"query": query, "page": "1", "num_pages": "1", "date_posted": "month"}
+            response = requests.get(url, headers=headers, params=params, timeout=15)
+            data = response.json()
+            for job in data.get("data", {}).get("jobs", [])[:5]:
+                j = {
+                    "title": job.get("job_title", "N/A"),
+                    "company": job.get("employer_name", "N/A"),
+                    "location": job.get("job_city", "Remote"),
+                    "description": job.get("job_description", "")[:500],
+                    "full_description": job.get("job_description", ""),
+                    "salary_min": job.get("job_min_salary"),
+                    "salary_max": job.get("job_max_salary"),
+                    "apply_link": job.get("job_apply_link", ""),
+                    "source": "JSearch",
+                }
+                key = f"{j['title'].lower().strip()}_{j['company'].lower().strip()}"
+                if key not in seen:
+                    seen.add(key)
+                    all_jobs.append(j)
+        except:
+            pass
 
-    return all_jobs
+        # Adzuna
+        try:
+            url = "https://api.adzuna.com/v1/api/jobs/us/search/1"
+            params = {
+                "app_id": keys["adzuna_id"],
+                "app_key": keys["adzuna_key"],
+                "results_per_page": 5,
+                "what": query,
+                "max_days_old": 30,
+            }
+            response = requests.get(url, params=params, timeout=15)
+            data = response.json()
+            for job in data.get("results", [])[:5]:
+                j = {
+                    "title": job.get("title", "N/A"),
+                    "company": job.get("company", {}).get("display_name", "N/A"),
+                    "location": job.get("location", {}).get("display_name", "Remote"),
+                    "description": job.get("description", "")[:500],
+                    "full_description": job.get("description", ""),
+                    "salary_min": job.get("salary_min"),
+                    "salary_max": job.get("salary_max"),
+                    "apply_link": job.get("redirect_url", ""),
+                    "source": "Adzuna",
+                }
+                key = f"{j['title'].lower().strip()}_{j['company'].lower().strip()}"
+                if key not in seen:
+                    seen.add(key)
+                    all_jobs.append(j)
+        except:
+            pass
+
+    state["jobs"] = all_jobs
+    state["status"] = "jobs_found" if all_jobs else "no_jobs_found"
+    return state
 
 
-def score_jobs(resume_text, jobs):
-    """Score jobs using the fine-tuned Sentence Transformer."""
+def score_matches_node(state: AgentState) -> AgentState:
+    resume_text = state["resume_text"]
+    jobs = state["jobs"]
+
     if not jobs:
-        return []
+        state["scored_jobs"] = []
+        state["status"] = "no_jobs_to_score"
+        return state
 
     clean_resume = clean_text_for_model(resume_text)
     resume_embedding = st_model.encode([clean_resume])
@@ -245,22 +264,41 @@ def score_jobs(resume_text, jobs):
         scored.append(job_copy)
 
     scored.sort(key=lambda x: x["similarity_score"], reverse=True)
-    return scored[:10]
+    state["scored_jobs"] = scored[:10]
+    state["status"] = "jobs_scored"
+    return state
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Build LangGraph Pipeline
+# ─────────────────────────────────────────────────────────────────────────────
 
+@st.cache_resource
+def build_pipeline():
+    workflow = StateGraph(AgentState)
 
+    workflow.add_node("parse_resume", parse_resume_node)
+    workflow.add_node("generate_queries", generate_queries_node)
+    workflow.add_node("search_jobs", search_jobs_node)
+    workflow.add_node("score_matches", score_matches_node)
 
+    workflow.set_entry_point("parse_resume")
+    workflow.add_edge("parse_resume", "generate_queries")
+    workflow.add_edge("generate_queries", "search_jobs")
+    workflow.add_edge("search_jobs", "score_matches")
+    workflow.add_edge("score_matches", END)
+
+    return workflow.compile()
+
+pipeline = build_pipeline()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UI Layout
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Header
 st.title("🔍 Smart Job Search")
 st.markdown("*Upload your resume and find the best matching jobs using AI-powered semantic matching.*")
 st.markdown("---")
 
-# Sidebar
 with st.sidebar:
     st.header("About")
     st.markdown("""
@@ -284,7 +322,6 @@ with st.sidebar:
     st.markdown("MS Applied AI")
     st.markdown("University of San Diego")
 
-# File Upload
 col1, col2 = st.columns([2, 1])
 
 with col1:
@@ -299,7 +336,6 @@ with col2:
     st.markdown("")
     use_sample = st.checkbox("Use sample resume instead")
 
-# Sample resume
 sample_resume = """John Smith
 john.smith@email.com | (555) 123-4567 | San Diego, CA
 
@@ -324,7 +360,6 @@ SKILLS
 Python, JavaScript, TypeScript, React, Django, Flask, FastAPI, PostgreSQL,
 MongoDB, AWS, Docker, Kubernetes, Git, CI/CD, REST APIs"""
 
-# Process Resume
 resume_text = None
 
 if uploaded_file:
@@ -336,60 +371,58 @@ elif use_sample:
     resume_text = sample_resume
 
 if resume_text:
-    # Show resume preview
     with st.expander("📄 Resume Preview", expanded=False):
         st.text(resume_text[:2000])
 
-    # Run Pipeline
     if st.button("🚀 Find Matching Jobs", type="primary", use_container_width=True):
 
-        # Step 1: Parse Resume
-        with st.status("Running AI Pipeline...", expanded=True) as status:
+        with st.status("Running LangGraph Pipeline...", expanded=True) as status:
 
-            st.write("📄 Parsing resume with Gemini...")
-            parsed = parse_resume(resume_text)
+            state = {
+                "resume_text": resume_text,
+                "parsed_resume": {},
+                "search_queries": [],
+                "jobs": [],
+                "scored_jobs": [],
+                "status": "started",
+                "errors": [],
+            }
 
-            if not parsed:
-                st.error("Failed to parse resume. Please try again.")
-                st.stop()
-
-            # Show parsed info
+            st.write("📄 Node 1: Parsing resume with Gemini...")
+            state = parse_resume_node(state)
+            parsed = state["parsed_resume"]
             st.write(f"✅ **{parsed.get('name', 'N/A')}** | {parsed.get('category', 'N/A')} | {parsed.get('experience_years', 'N/A')} years experience")
 
-            # Step 2: Generate Queries
-            st.write("🔍 Generating search queries...")
-            queries = generate_search_queries(parsed)
+            st.write("🔍 Node 2: Generating search queries...")
+            state = generate_queries_node(state)
+            queries = state["search_queries"]
             st.write(f"✅ Queries: {', '.join(queries)}")
 
-            # Step 3: Search Jobs
-            st.write("🌐 Searching JSearch & Adzuna...")
-            jobs = search_all_jobs(queries)
-            st.write(f"✅ Found {len(jobs)} unique jobs")
+            st.write("🌐 Node 3: Searching JSearch & Adzuna...")
+            state = search_jobs_node(state)
+            st.write(f"✅ Found {len(state['jobs'])} unique jobs")
 
-            if not jobs:
-                st.error("No jobs found. Try uploading a different resume.")
-                st.stop()
-
-            # Step 4: Score Matches
-            st.write("🎯 Scoring matches with fine-tuned model...")
-            scored_jobs = score_jobs(resume_text, jobs)
+            st.write("🎯 Node 4: Scoring matches with fine-tuned model...")
+            state = score_matches_node(state)
+            scored_jobs = state["scored_jobs"]
             st.write(f"✅ Top {len(scored_jobs)} matches ranked")
+
+            if state.get("errors"):
+                for err in state["errors"]:
+                    st.warning(err)
 
             status.update(label="Pipeline complete!", state="complete")
 
-        # Store results in session state
         st.session_state["parsed"] = parsed
         st.session_state["scored_jobs"] = scored_jobs
         st.session_state["queries"] = queries
 
-    # Display Results
     if "scored_jobs" in st.session_state:
         parsed = st.session_state["parsed"]
         scored_jobs = st.session_state["scored_jobs"]
 
         st.markdown("---")
 
-        # Candidate Summary
         st.subheader("👤 Candidate Profile")
         col1, col2, col3 = st.columns(3)
         col1.metric("Name", parsed.get("name", "N/A"))
@@ -402,13 +435,11 @@ if resume_text:
 
         st.markdown("---")
 
-        # Job Results
         st.subheader(f"🏆 Top {len(scored_jobs)} Job Matches")
 
         for i, job in enumerate(scored_jobs):
             score = job.get("similarity_score", 0)
 
-            # Color based on score
             if score >= 0.6:
                 score_color = "🟢"
             elif score >= 0.4:
@@ -416,7 +447,6 @@ if resume_text:
             else:
                 score_color = "🔴"
 
-            # Salary formatting
             if job.get("salary_min") and job.get("salary_max"):
                 salary = f"${job['salary_min']:,.0f} - ${job['salary_max']:,.0f}"
             elif job.get("salary_min"):
@@ -424,7 +454,6 @@ if resume_text:
             else:
                 salary = "Not listed"
 
-            # Job card
             with st.container():
                 col1, col2 = st.columns([4, 1])
 
@@ -435,7 +464,6 @@ if resume_text:
                 with col2:
                     st.markdown(f"### {score_color} {score:.1%}")
 
-                # Expandable details
                 with st.expander("View Details"):
                     st.markdown(f"**Description:** {job.get('description', 'N/A')}")
 
@@ -444,5 +472,4 @@ if resume_text:
 
                 st.markdown("---")
 else:
-    # Landing state
     st.info("👆 Upload your resume or check 'Use sample resume' to get started.")
