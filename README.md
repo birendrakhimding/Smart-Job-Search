@@ -3,6 +3,7 @@
 A semantic resume-to-job matching system that uses deep learning to find the most relevant job postings for your resume. Built as a capstone project for MS Applied AI at the University of San Diego.
 
 **[Try the Live App →](https://smartjobsearch.streamlit.app)**
+> **Note:** The app is hosted on Streamlit Community Cloud (free tier) and goes to sleep after 12 hours of inactivity. If you see a sleeping page, click "Yes, get this app back up!" and wait about 1–2 minutes for it to reload.
 
 ## How It Works
 
@@ -39,8 +40,8 @@ The fine-tuned Sentence Transformer outperformed the LSTM baseline by **+18.8 pe
 
 ## Datasets
 
-- **LiveCareer Resume Dataset** — 2,484 resumes across 24 job categories
-- **LinkedIn Job Postings** — 101,492 filtered postings across 24 matching categories
+- **LiveCareer Resume Dataset** — 2,484 resumes across 24 job categories [Kaggle Link](https://www.kaggle.com/datasets/snehaanbhawal/resume-dataset)
+- **LinkedIn Job Postings** — 101,492 filtered postings across 24 matching categories [Kaggle Link](https://www.kaggle.com/datasets/arshkon/linkedin-job-postings)
 
 ## Tech Stack
 
