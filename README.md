@@ -70,7 +70,3 @@ ADZUNA_APP_KEY="your-key"
 streamlit run app.py
 ```
 
-## Author
-
-**Birendra Khimding**
-MS Applied AI, University of San Diego
